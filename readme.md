@@ -359,3 +359,185 @@ Tips:
 
 ## Building docker images
 
+### What are docker files?
+
+Dockerfile is used to describe how to build a docker image instead of using command line parameters.
+
+Command:
+
+`docker build -t [name of result] -f [dockerfile location] [context directory or URL]`
+
+where name and dockerfile location are optional. 
+
+The entire context is sent to the docker daemon, so use an empty directory and keep the dockerfile there.
+
+To build the dockerfile in the current directory, the minimal command is
+
+`docker build .`
+
+When done, the image will be available in the local docker registry.
+
+Each image takes the image from the previous line and makes another image; the previous image is unchanged; it does not modify the state from the previous line.
+You don't want large files to span lines or the image will be huge.
+
+>The Docker daemon runs the instructions in the Dockerfile one-by-one, committing the result of each instruction to a new image if necessary, before finally outputting the ID of your new image. The Docker daemon will automatically clean up the context you sent.
+>Note that each instruction is run independently, and causes a new image to be created - so RUN cd /tmp will not have any effect on the next instructions.
+> [Official dockerfile documentation](https://docs.docker.com/engine/reference/builder/)
+
+>Only the instructions RUN, COPY, ADD create layers. Other instructions create temporary intermediate images, and do not increase the size of the build.
+>[from docker best practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/)
+
+
+The steps / images in the dockerfile are cached, so parts that change the most should be put at the end of the dockerfile.
+
+Processes started on one line will *not be running* on the next line, so more than one operations that should operate on the same container must be on the same line.
+
+Environment variables set with `ENV`*do* persist on the next line.
+
+### Build basic docker files
+
+The Dockerfiles name must be `Dockerfile`.
+
+The most basic Dockerfile:
+
+    # Specify what image to start from. busybox is supertiny with a shell
+    FROM busybox
+    # In that container, echo something
+    RUN echo "building simple docker image"
+    # set command to run when the image is started
+    # there can be only one CMD in a dockerfile;
+    # if there are multiple, only the last one will take effect
+    CMD echo "Hello container"
+
+Output:
+
+    pk@pk-lightshow:~/projects/lynda/learning_docker/building_dockerfiles$ docker build .
+    Sending build context to Docker daemon  2.048kB
+    Step 1/3 : FROM busybox
+    latest: Pulling from library/busybox
+    8ec32b265e94: Pull complete
+    Digest: sha256:b37dd066f59a4961024cf4bed74cae5e68ac26b48807292bd12198afa3ecb778
+    Status: Downloaded newer image for busybox:latest
+    ---> 42b97d3c2ae9
+    Step 2/3 : RUN echo "building simple docker image"
+    ---> Running in 15c74c9803b8
+    building simple docker image
+    Removing intermediate container 15c74c9803b8
+    ---> c063a20563cd
+    Step 3/3 : CMD echo "Hello container"
+    ---> Running in 0d3fa0b790a4
+    Removing intermediate container 0d3fa0b790a4
+    ---> 0ce0a604924c
+    Successfully built 0ce0a604924c
+    pk@pk-lightshow:~/projects/lynda/learning_docker/building_dockerfiles$
+    pk@pk-lightshow:~/projects/lynda/learning_docker/building_dockerfiles$ docker run --rm 0ce0a
+    Hello container
+
+### Installing programs
+
+Self explanatory
+
+    FROM debian:sid
+    RUN apt-get -y update
+    RUN apt-get -y install nano
+    # when run, opens a notes file (command and parameters, "exec form")
+    CMD ["nano" "/tmp/notes"]
+
+After running `docker build -t pkro/nanoer .`, running `docker run --rm -ti pkro/nanoer` will run the container and start nano.
+
+When exiting nano, the container is stopped as with the "exec form", the nano editor is the main task of the container, not the shell (which isn't started at all).
+
+### Adding files
+
+Note: we are starting from the container we created in the previous step. As only the last CMD is executed, we don't have to worry about the CMD in it.
+
+    # start with previously created container
+    # or we could put the creation steps (minus CMD) here to start from scratch
+    FROM pkro/nanoer
+    # copy notes.txt in the current (context) directory into container
+    ADD notes.txt /notes.txt
+    CMD ["/bin/nano", "/notes.txt"]
+
+### Dockerfile syntax
+
+#### FROM
+
+- indicates which image to start from (and download if necessary)
+- must be the first command in dockerfile
+- multiple are possible (when?)
+
+#### MAINTAINER
+
+Defines the author of the dockerfile, `MAINTAINER Firstname Lastname <email@example.com>`
+
+#### RUN
+
+Runs the command line, waits for it to finish, and saves the result, e.g. `RUN unzip install.zip /opt/install`
+
+#### ADD
+
+- Adds local files `ADD run.sh /run.sh`
+- Adds (uncompresses) the *contents* of archives `ADD project.tar.gz /install/`
+- Works with URLs `ADD https://project.example.com/download/example.rpm /project/`
+
+#### ENV
+
+- sets environment variables that will still be available in the resulting image (during build and final). `ENV DB_PORT=5432`
+
+#### ENTRYPOINT
+- `ENTRYPOINT` specifies the start of the command to run, so everything added at the end of `docker run` is appended to it
+
+If your container acts like a command-line program, use ENTRYPOINT
+
+#### CMD
+
+- `CMD` specifies the whole command to run; it gets replaced when the container is run with it's own command, e.g. "bash" at the end.
+- if ENTRYPOINT exists, content of CMD will be added as if added at the end of `docker run`
+
+  Note that CMD and ENTRYPOINT has three forms:
+
+  # exec form (preferred); doesn't start any shell
+  CMD ["executable", "param1", "param2"]
+  # params are parameters for the executable defined
+  # in ENTRYPOINT
+  CMD ["param1", "param2"]
+  # Shell form (only this one does shell processing so ENV vars can be used)
+  # will execute /bin/sh -c
+  CMD executable param1 param2
+
+If unsure, use CMD
+
+#### EXPOSE
+
+Maps a port into the container, e.g. `EXPOSE 8080:8080`
+
+#### VOLUME
+
+Defines shared or ephemeral volumes;
+
+- Shared: `VOLUME ["/host/path/", "/container/path"]`
+- Ephemeral (can still be shared with other containers): `VOLUME ["/shared-data"]`
+- Avoid defining shared folders in dockerfiles because then it will only work on the specific computer
+
+#### WORKDIR
+
+>Sets the working directory (in the container) for any RUN, CMD, ENTRYPOINT, COPY and ADD instructions that follow it in the Dockerfile
+> [workdir reference on docker.com](https://docs.docker.com/engine/reference/builder/#workdir)
+
+##### USER
+
+Sets the user the container will run as (**important for shared folders**)
+
+    # using username
+    USER arthur
+    # using user ID
+    USER 1000
+
+[Article on common pitfalls when sharing web folders with php/docker](https://jtreminio.com/blog/running-docker-containers-as-current-host-user/#ok-so-what-actually-works)
+
+### Multi-project Docker files
+
+We might want to have a complete and large dockerfile and a small production dockerfile. If we use 2 separate files, these might get out of sync at some point.
+
+[Dockerfile best practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/)
+
