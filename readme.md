@@ -1,5 +1,6 @@
 # Learning docker course notes
 
+[Docker cheat sheet](https://github.com/collabnix/dockerlabs/blob/master/docker/cheatsheet/README.md)
 
 ## Terms
 
