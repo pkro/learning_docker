@@ -464,7 +464,7 @@ Note: we are starting from the container we created in the previous step. As onl
 
 - indicates which image to start from (and download if necessary)
 - must be the first command in dockerfile
-- multiple are possible (when?)
+- multiple are possible (see [multi-project dockerfiles section](#multi-project-docker-files) )
 
 #### MAINTAINER
 
@@ -492,18 +492,18 @@ If your container acts like a command-line program, use ENTRYPOINT
 #### CMD
 
 - `CMD` specifies the whole command to run; it gets replaced when the container is run with it's own command, e.g. "bash" at the end.
-- if ENTRYPOINT exists, content of CMD will be added as if added at the end of `docker run`
+  - if ENTRYPOINT exists, content of CMD will be added as if added at the end of `docker run`
 
-  Note that CMD and ENTRYPOINT has three forms:
+Note that CMD and ENTRYPOINT has three forms:
 
-  # exec form (preferred); doesn't start any shell
-  CMD ["executable", "param1", "param2"]
-  # params are parameters for the executable defined
-  # in ENTRYPOINT
-  CMD ["param1", "param2"]
-  # Shell form (only this one does shell processing so ENV vars can be used)
-  # will execute /bin/sh -c
-  CMD executable param1 param2
+    # exec form (preferred); doesn't start any shell
+    CMD ["executable", "param1", "param2"]
+    # params are parameters for the executable defined
+    # in ENTRYPOINT
+    CMD ["param1", "param2"]
+    # Shell form (only this one does shell processing so ENV vars can be used)
+    # will execute /bin/sh -c
+    CMD executable param1 param2
 
 If unsure, use CMD
 
@@ -524,7 +524,9 @@ Defines shared or ephemeral volumes;
 >Sets the working directory (in the container) for any RUN, CMD, ENTRYPOINT, COPY and ADD instructions that follow it in the Dockerfile
 > [workdir reference on docker.com](https://docs.docker.com/engine/reference/builder/#workdir)
 
-##### USER
+This will also be the working dir in the finished image.
+
+#### USER
 
 Sets the user the container will run as (**important for shared folders**)
 
@@ -541,3 +543,380 @@ We might want to have a complete and large dockerfile and a small production doc
 
 [Dockerfile best practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/)
 
+    FROM ubuntu:16.04 as builder
+    RUN apt-get update
+    RUN apt-get -y install curl
+    # write google character count in google-size file
+    RUN curl https://google.com | wc -c > google-size
+    ENTRYPOINT echo google is this big; cat google-size
+
+Build / run:
+
+    docker build -t pkro/googlesize .
+    docker run --rm pkro/googlesize
+
+This produces a large image (~180mb).
+
+Dockerfile:
+
+    FROM ubuntu:16.04 as builder
+    RUN apt-get update
+    RUN apt-get -y install curl
+    # write google character count in google-size file
+    RUN curl https://google.com | wc -c > google-size
+    
+    FROM alpine
+    COPY --from=builder /google-size /google-size
+    ENTRYPOINT echo google is this big; cat google-size
+
+Build / run:
+
+    docker build -t pkro/googlesize2 .
+    docker run --rm pkro/googlesize2
+
+This produces a much smaller image (< 6mb). But this just copies the already created textfile in a smaller alpine linux, so it's a bad example as it doesn't really do a character count.
+
+### Avoid golden images
+
+= an image that replaces a canonical build with a locally-modified version.
+
+- include installer of the software that gets installed in your project as it may not be available in the future
+- have a canonical build system that builds everything from scratch / from a standard base image
+- tag builds with the git hash of the code that built it. Don't overwrite images that were used before.
+- Use small base images such as Alpine 
+- build images that oyu share publicly from dockerfiles, always
+- don't ever leave passwords in layers. Delete them in the same step
+
+## Under the hood
+
+### What kernels do
+
+The kernel runs directly on the hardware.
+
+Responsibilities:
+
+- Respond to messages from the hardware
+- starts and schedules programs
+- controls and organizes storage
+- pass messages between programs
+- allocates ressources, memory, CPU, network
+
+### Docker
+
+- program written in Go
+- manages kernel features
+  - Uses "cgroups" to contain processes; this keeps containers interfering which each other
+  - uses "namespaces" to contain networks / split networking stack
+  - uses "copy-on-write" file systems to build images
+- Used for years before docker, but made easy and popular by docker
+- Docker is 2 programs: a client and a server.
+- The server receives commands over a socket (network or unix-style "file" socket when on the same computer). The socket is located in `/var/run/docker.sock`. Writing into this file in the proper formate causes the docker server to do stuff.
+- the client can even run inside docker itself
+
+Running docker locally:
+![run docker locally over socket](readme_images/runlocally.png)
+
+Running the client inside a container:
+![Running the client inside a container](readme_images/clientincontainer.png)
+
+We share the socket file between host and container so they can communicate and start docker.
+
+    # on host
+    docker run -ti --rm -v /var/run/docker.sock:/var/run/docker.sock docker sh
+    # in the container we just started:
+    docker run -ti --rm ubuntu bash
+
+This is NOT a docker server inside a docker server, it's a client inside a docker container controlling the hosts docker server via the docker.sock.
+
+### Networking and namespaces
+
+#### Network in brief
+
+- Ethernet: moves "frames" of data on a wire (or Wi-Fi)
+- IP layer: moves packets on a local network
+- Routing: forwards packets between networks
+- Ports: address particular programs / services on a computer
+
+#### Bridging
+
+- Docker uses bridges to create virtual networks in your computer
+- these are software switches
+- they control the ethernet layer
+
+
+      # reminder: --net=host gives full access to the hosts networking stack
+      docker run --rm -ti --net=host ubuntu:16.04 bash
+      # inside the container
+      root@pk-lightshow:/# apt-get update && apt-get install bridge-utils
+      root@pk-lightshow:/# brctl show
+      bridge name     bridge id               STP enabled     interfaces
+      docker0         8000.0242614a79bc       no 
+      
+      # on host, new terminal
+      # docker network create my-new-network
+
+      # in container it shows the new network now:
+      root@pk-lightshow:/# brctl show
+      bridge name     bridge id               STP enabled     interfaces
+      br-968b669c1e47         8000.0242eff1b79d       no              
+      docker0         8000.0242614a79bc       no  
+
+#### Routing
+
+- Creates linux built in "firewall" (iptables) rules to move packets between networks
+- = NAT (Network address translation); changes source / destination address on the way out / in
+
+Exposing ports in docker is just port forwarding at the networking layer.
+
+Proof:
+    
+    # terminal 1:
+    docker run -ti --rm -p 8080:8080 ubuntu bash
+
+    # terminal 2
+    # --privileged=true gives the container full control over the system
+    # that is hosting it
+    docker run -ti --rm --net=host --privileged=true ubuntu bash
+    apt-get install iptables
+    iptables -n -L -t nat | grep 8080
+    MASQUERADE  tcp  --  172.17.0.2           172.17.0.2           tcp dpt:8080
+    DNAT       tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:8080 to:172.17.0.2:8080
+
+#### Namespaces
+
+Keep containers and host system safe from each other.
+
+- allow processes to be attached to private network segments
+- these private networks are bridged into a shared network with the resot of the containers
+- containers have virtual network "cards"
+- containers get their own copy of the networking stack
+
+### Processes and cgroups
+
+#### Primer on Linux processes
+
+- processes come from other processes - parent-child relationship
+- when a child process exits, it returns an exit code to its parent
+- process zero is special; called *init*, the process that starts the rest
+
+In Docker the container starts with an init process and vanishes when that process exits.
+
+`docker inspect` can be used to extract any information you need from a container, here we use it to check what's the init process.
+
+
+    # Terminal 1:
+    docker run -ti --rm --name hello ubuntu bash
+
+    # Terminal 2:
+    # .State.Pid = process id of the process
+    docker inspect --format '{{.State.Pid}}' hello
+    # the main process ID
+    13364
+    # start another container with even higher privileges (--pid=host)
+    docker run -ti --rm --privileged=true --pid=host ubuntu bash
+    kill 13364
+
+    # Container in Terminal 1 is killed automatically (exit is not entered at the
+    # shell but the output of the container as it exits)
+    root@6c737bf5828f:/# exit
+    pk@pk-lightshow:~$
+
+#### Ressource limiting
+
+- scheduling CPU time
+- memory allocation limits
+- inherited limitations and quotas
+- can't escape limits by starting more processes (?)
+
+### Storage
+
+#### Unix storage in brief
+
+- lowest layer: actual storage devices
+- next layer: logical storage devices
+- next layer: filesystems
+- FUSE filesystems and network filesystems
+
+#### The secret of docker: COWs - Copy On Write
+
+Docker images are read only!
+
+Instead of writing information directly to an image, it is written on a layer that is put over that image and give 
+that to the container. So the container sees the image with the new information, but the image without the added 
+information still exists and can be used by another container to put its own layer on.
+
+![cows](readme_images/cows.png)
+
+#### Moving cows
+- The contents of layers are moved between containers in gzip files.
+- Containers are independent of the storage engine
+- any container can be loaded almost anywhere
+- it is possible to run out of layers in some storage engines (doesn't come up often)
+
+#### Volumes and Bind Mounting
+
+- The linux VFS (Virtual file system)
+- mounting devices on the vfs
+- mounting directories on the vfs
+
+Bind mounting in action:
+
+    pk@pk-lightshow:~$ docker run -ti --rm --privileged=true ubuntu bash
+    root@a28d4a816aaf:/# mkdir example
+    root@a28d4a816aaf:/# cd example/
+    root@a28d4a816aaf:/example# mkdir work
+    root@a28d4a816aaf:/example# cd work
+    root@a28d4a816aaf:/example/work# touch a b c d e f
+    root@a28d4a816aaf:/example/work# ls
+    a  b  c  d  e  f
+    root@a28d4a816aaf:/example/work# cd ..
+    root@a28d4a816aaf:/example# mkdir other-work
+    root@a28d4a816aaf:/example# cd other-work/
+    root@a28d4a816aaf:/example/other-work# touch other-a other-b other-c other-d
+    root@a28d4a816aaf:/example/other-work# ls
+    other-a  other-b  other-c  other-d
+    root@a28d4a816aaf:/example/other-work# cd ..
+    root@a28d4a816aaf:/example# ls -R
+    .:
+    other-work  work
+    
+    ./other-work:
+    other-a  other-b  other-c  other-d
+    
+    ./work:
+    a  b  c  d  e  f
+    root@a28d4a816aaf:/example# mount -o bind other-work work
+    root@a28d4a816aaf:/example# ls -R
+    .:
+    other-work  work
+    
+    ./other-work:
+    other-a  other-b  other-c  other-d
+    
+    ./work:
+    other-a  other-b  other-c  other-d
+    root@a28d4a816aaf:/example# umount work
+    root@a28d4a816aaf:/example# ls -R
+    .:
+    other-work  work
+    
+    ./other-work:
+    other-a  other-b  other-c  other-d
+    
+    ./work:
+    a  b  c  d  e  f
+    root@a28d4a816aaf:/example# 
+
+Gist is that a b c d e f weren't gone but the content of other-work was layered on top of it by using bind.
+
+- So it's important getting the mount order correct using the -v or volumes directives
+- Mounting volumes always mounts the host's filesystem over the guest! Never the other way around.
+
+## Orchestration - building systems with docker
+
+### Registries in detail
+
+#### What is a docker registry?
+
+- Program
+- stores layers and images
+- listens on port 5000 (default)
+- maintains an index and searches tags
+- authorizes and authenticates connections
+
+#### Popular docker registries
+
+- The official python docker registry
+- nexus
+
+#### Running the docker registry in docker
+
+Running a local registry in docker:
+
+    docker run -d -p 5000:5000 --restart=always --name registry registry:2
+    # tag and assign a registry
+    docker tag ubuntu:16.04 localhost:5000/mycompany/my-ubuntu:99
+    # push image locally so we don't depend on the repo
+    docker push localhost:5000/mycompany/my-ubuntu:99
+
+[Setting up a registry @ docker.com](https://docs.docker.com/registry/)
+
+[registry deployment & security @ docker.com](https://docs.docker.com/registry/deploying/)
+
+Storage:
+
+- local storage
+- docker trusted registry
+- amazon elastic container registry
+- google cloud container registry
+- azure container registry
+
+#### Saving and loading containers without a registry
+
+Docker images can be simply saved locally without a registry as well using `docker save` and `docker load`:
+
+    # o for output
+    docker save -o my-images.tar.gz debian:sid busybox ubuntu:16.04
+    # delete local images we just saved (for testing)
+    docker rmi debian:sid busybox ubuntu:16.04
+    # reload them from the archive
+    docker load -i my-images.tar.gz
+    
+This is also useful for migrating between storage types.
+
+### Intro to orchestration
+
+There are many orchestration systems for docker. They are used to
+
+- start containers (and restart them on failure)
+- service discovery - allow them to find each other
+- ressource allocation - match containers to computers (that have the needed ressources)
+
+#### Docker compose
+
+Docker compose is an orchestration system for single machine coordination and is designed for testing and development.
+
+It brings up all your containers, volumes, networks etc. with one command: `docker-compose up`
+
+#### Kubernetes
+
+Kubernetes terminology and functionality:
+
+- *Containers* run programs
+- *Pods* group containers together on the same system
+- *Services* make pods available to others
+- *Labels* are used for very advanced service discovery
+
+Advantages:
+
+- The `kubectl` command makes scripting large operations possible.
+- Kubernetes has very flexible overlay networking
+- runs equally well on local hardware or a cloud provider
+
+#### EC2 container service (ECS)
+
+- *Task definitions* define a set of containers that always run together (a little like pods)
+- *Tasks* actually make a container run right now
+- *Services*
+
+Advantages:
+
+- connects load balancers to services
+- can create own host instances in AWS
+- make your instances start the agent and join the cluster
+- pass the docker control socket into the agent
+- provides docker repos
+- containers (tasks) can be part of CloudFormation stacks which makes deployment along with other resources very easy.
+
+[get started with ecs](https://aws.amazon.com/ecs/)
+
+*no notes on videos [Kubernetes in AWS EKS]((https://www.linkedin.
+com/learning/learning-docker-2018/kubernetes-in-aws?
+u=82598426) and [google kubernetes engine](https://www.linkedin.
+com/learning/learning-docker-2018/kubernetes-in-aws?
+u=82598426) 
+
+## Next steps
+
+- Learn more about docker-compose
+- Make a personal development image
