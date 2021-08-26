@@ -82,6 +82,7 @@
 - Docker is NOT a VM
 - self contained, sealed unit of software
 - contains everything required to run the code including the OS
+- Docker containers **use the same kernel as the host**
 
 Container:
 
